@@ -1,0 +1,374 @@
+import ipywidgets as widgets
+from IPython.display import display, HTML
+
+# JavaScriptベースの3Dシミュレータ（タイムログ配置改善・完全スマホ対応版）
+html_code = """
+<div style="background-color: #111; padding: 15px; border-radius: 10px; font-family: sans-serif; color: #fff; max-width: 800px; margin: auto; user-select: none; box-sizing: border-box;">
+    <h3 style="margin-top: 0; color: #00ffcc; font-size: 1.2rem; line-height: 1.4;">一般相対性理論：空間の歪みと光の遅延シミュレーション</h3>
+    <p style="font-size: 11px; color: #aaa; margin-top: -5px; line-height: 1.3;">※ドラッグ・スワイプで視点変更（上下左右30度制限）</p>
+    
+    <div id="infoPanel" style="background: rgba(255,255,255,0.05); border: 1px solid #0055ff; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 12px; line-height: 1.5; color: #00ffcc; margin-bottom: 15px; box-sizing: border-box;">
+        <div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px 15px;">
+            <div>直線ルート: <span id="timeStr" style="font-weight: bold;">0.00</span> s</div>
+            <div>歪みルート: <span id="timeDist" style="font-weight: bold;">0.00</span> s</div>
+            <div style="color: #ff9900;">時間の遅れ: <span id="timeDelay" style="font-weight: bold;">0.00</span> s</div>
+        </div>
+    </div>
+    
+    <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 15px; margin-bottom: 15px;">
+        <div style="display: flex; align-items: center; flex-grow: 1; min-width: 200px;">
+            <label for="massSlider" style="margin-right: 10px; font-size: 14px; white-space: nowrap;">天体の質量:</label>
+            <input type="range" id="massSlider" min="0" max="5.5" step="0.5" value="3" style="flex-grow: 1; vertical-align: middle; height: 8px;">
+            <span id="massValue" style="margin-left: 10px; color: #00ffcc; font-weight: bold; font-size: 15px; min-width: 40px; text-align: right;">3.0</span>
+        </div>
+        <button id="startBtn" style="background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 14px; flex-grow: 1; text-align: center;">光を発射 (Start)</button>
+    </div>
+
+    <div style="position: relative; background-color: #000; border: 1px solid #333; border-radius: 5px; overflow: hidden; width: 100%;">
+        <canvas id="simCanvas" style="width: 100%; height: auto; display: block; cursor: grab;"></canvas>
+    </div>
+</div>
+
+<script>
+(function() {
+    const canvas = document.getElementById('simCanvas');
+    const ctx = canvas.getContext('2d');
+    const massSlider = document.getElementById('massSlider');
+    const massValue = document.getElementById('massValue');
+    const startBtn = document.getElementById('startBtn');
+    
+    const timeStrEl = document.getElementById('timeStr');
+    const timeDistEl = document.getElementById('timeDist');
+    const timeDelayEl = document.getElementById('timeDelay');
+
+    let massInput = parseFloat(massSlider.value);
+    let isInfinity = false;
+    let mass = massInput;
+    
+    let isAnimating = false;
+    let lightProgressStr = -10; 
+    let lightProgressDist = -10;
+    let isCaptured = false; 
+    
+    let pathHistoryStr = [];
+    let pathHistoryDist = [];
+    
+    let cx = 0;
+    let cy = 0;
+    let scaleX = 0;
+    let scaleY = 0;
+    let scaleZ = 0;
+
+    function resizeCanvas() {
+        const displayWidth = canvas.clientWidth;
+        const displayHeight = displayWidth * (3 / 5);
+        const dpr = window.devicePixelRatio || 1;
+        
+        canvas.width = displayWidth * dpr;
+        canvas.height = displayHeight * dpr;
+        ctx.scale(dpr, dpr);
+        
+        cx = displayWidth / 2;
+        cy = displayHeight / 2 - (displayHeight * 0.04); 
+        
+        const baseScale = displayWidth / 750;
+        scaleX = 33 * baseScale;
+        scaleY = 7 * baseScale;
+        scaleZ = 35 * baseScale;
+    }
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    const baseAngleZ = -0.35;
+    let angleX = 0.0;   
+    let angleZOffset = 0.0; 
+
+    let isDragging = false;
+    let previousMouseX = 0;
+    let previousMouseY = 0;
+
+    function project(x, y, z) {
+        let totalZ = baseAngleZ + angleZOffset;
+        let x1 = x * Math.cos(totalZ) - y * Math.sin(totalZ);
+        let y1 = x * Math.sin(totalZ) + y * Math.cos(totalZ);
+        
+        let effScaleY = scaleY + (angleX * (scaleY * 2.14)); 
+        return {
+            x: cx + x1 * scaleX,
+            y: cy + y1 * effScaleY - (z * scaleZ)
+        };
+    }
+
+    function getZ(x, y) {
+        let r = Math.sqrt(x*x + y*y);
+        if (isInfinity) {
+            if (r < 0.1) return -12.0; 
+            return -2.2 / (r * 0.4); 
+        } else {
+            return -mass * 1.0 * Math.exp(-r*r / 12); 
+        }
+    }
+
+    function startDrag(x, y) {
+        isDragging = true;
+        previousMouseX = x;
+        previousMouseY = y;
+        canvas.style.cursor = 'grabbing';
+    }
+
+    function moveDrag(x, y) {
+        if (!isDragging) return;
+        let deltaX = x - previousMouseX;
+        let deltaY = y - previousMouseY;
+
+        const sensFactor = 750 / canvas.clientWidth;
+        angleZOffset -= deltaX * 0.0035 * sensFactor; 
+        angleX -= deltaY * 0.002 * sensFactor; 
+
+        const limit30 = 30 * Math.PI / 180; 
+        if (angleZOffset > limit30) angleZOffset = limit30;
+        if (angleZOffset < -limit30) angleZOffset = -limit30;
+        if (angleX > limit30) angleX = limit30;
+        if (angleX < -limit30) angleX = -limit30;
+
+        previousMouseX = x;
+        previousMouseY = y;
+    }
+
+    function endDrag() {
+        isDragging = false;
+        canvas.style.cursor = 'grab';
+    }
+
+    canvas.addEventListener('mousedown', (e) => startDrag(e.clientX, e.clientY));
+    window.addEventListener('mousemove', (e) => moveDrag(e.clientX, e.clientY));
+    window.addEventListener('mouseup', endDrag);
+
+    canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 1) {
+            startDrag(e.touches[0].clientX, e.touches[0].clientY);
+            e.preventDefault(); 
+        }
+    }, { passive: false });
+    window.addEventListener('touchmove', (e) => {
+        if (isDragging && e.touches.length === 1) {
+            moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+            e.preventDefault();
+        }
+    }, { passive: false });
+    window.addEventListener('touchend', endDrag);
+
+
+    function draw() {
+        const w = canvas.clientWidth;
+        const h = w * (3 / 5);
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, w, h);
+        
+        ctx.strokeStyle = '#0044ff';
+        ctx.lineWidth = 1;
+        const range = 10;
+        
+        for (let j = -range; j <= range; j += 1) {
+            ctx.beginPath();
+            for (let i = -range; i <= range; i += 0.4) {
+                let z = getZ(i, j);
+                if (z < -12) z = -12; 
+                let p = project(i, j, z);
+                if (i === -range) ctx.moveTo(p.x, p.y);
+                else ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+        }
+        for (let i = -range; i <= range; i += 1) {
+            ctx.beginPath();
+            for (let j = -range; j <= range; j += 0.4) {
+                let z = getZ(i, j);
+                if (z < -12) z = -12;
+                let p = project(i, j, z);
+                if (j === -range) ctx.moveTo(p.x, p.y);
+                else ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+        }
+
+        let pSource1 = project(-10, 5, getZ(-10, 5));
+        let pSource2 = project(-10, 0, getZ(-10, 0));
+        ctx.fillStyle = '#ffff00';
+        ctx.beginPath(); ctx.arc(pSource1.x, pSource1.y, 4, 0, 2*Math.PI); ctx.fill();
+        ctx.beginPath(); ctx.arc(pSource2.x, pSource2.y, 4, 0, 2*Math.PI); ctx.fill();
+
+        if (pathHistoryStr.length > 1) {
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.8)';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            for (let k = 0; k < pathHistoryStr.length; k++) {
+                let p = project(pathHistoryStr[k].x, pathHistoryStr[k].y, pathHistoryStr[k].z);
+                if (k === 0) ctx.moveTo(p.x, p.y);
+                else ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+        }
+
+        if (pathHistoryDist.length > 1) {
+            ctx.strokeStyle = 'rgba(255, 153, 0, 0.8)';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            for (let k = 0; k < pathHistoryDist.length; k++) {
+                let p = project(pathHistoryDist[k].x, pathHistoryDist[k].y, pathHistoryDist[k].z);
+                if (k === 0) ctx.moveTo(p.x, p.y);
+                else ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+        }
+
+        if (isAnimating) {
+            if (lightProgressStr < 10) {
+                lightProgressStr += 0.15;
+                if (lightProgressStr > 10) lightProgressStr = 10;
+                pathHistoryStr.push({x: lightProgressStr, y: 5, z: getZ(lightProgressStr, 5)});
+            }
+            
+            if (!isCaptured) {
+                if (isInfinity) {
+                    if (lightProgressDist < -0.4) {
+                        lightProgressDist += 0.15;
+                        pathHistoryDist.push({x: lightProgressDist, y: 0, z: getZ(lightProgressDist, 0)});
+                    } else {
+                        isCaptured = true;
+                        this.fallX = lightProgressDist;
+                        this.fallZ = getZ(lightProgressDist, 0);
+                    }
+                } else {
+                    let factor = 1.0 + (mass * 0.6) * Math.exp(-lightProgressDist*lightProgressDist / 6);
+                    lightProgressDist += 0.15 / factor; 
+                    if (lightProgressDist > 10) lightProgressDist = 10;
+                    pathHistoryDist.push({x: lightProgressDist, y: 0, z: getZ(lightProgressDist, 0)});
+                }
+            } else {
+                if (this.fallZ > -11.5) {
+                    this.fallX += (0 - this.fallX) * 0.15; 
+                    this.fallZ -= 0.22; 
+                    pathHistoryDist.push({x: this.fallX, y: 0, z: this.fallZ});
+                }
+            }
+
+            let tStr = ((lightProgressStr + 10) / 20) * 15.0;
+            if (!isInfinity) {
+                if (lightProgressDist < 10) {
+                    timeStrEl.innerText = tStr.toFixed(2);
+                    timeDistEl.innerText = tStr.toFixed(2);
+                    let currentDelay = (lightProgressStr - lightProgressDist) * (mass * 0.4);
+                    timeDelayEl.innerText = Math.max(0, currentDelay).toFixed(2);
+                } else {
+                    let finalDelay = mass * 2.2; 
+                    timeStrEl.innerText = "15.00";
+                    timeDistEl.innerText = (15.00 + finalDelay).toFixed(2);
+                    timeDelayEl.innerText = finalDelay.toFixed(2);
+                    isAnimating = false; 
+                }
+            } else {
+                timeStrEl.innerText = tStr.toFixed(2);
+                if (isCaptured) {
+                    timeDistEl.innerText = "中断";
+                    timeDelayEl.innerText = "∞ (不可)";
+                    if (lightProgressStr >= 10) {
+                        timeStrEl.innerText = "15.00";
+                        isAnimating = false; 
+                    }
+                } else {
+                    timeDistEl.innerText = tStr.toFixed(2);
+                    timeDelayEl.innerText = "0.00";
+                }
+            }
+
+            let pLightStr = project(lightProgressStr, 5, getZ(lightProgressStr, 5));
+            ctx.fillStyle = '#00ffff';
+            ctx.shadowBlur = 10; ctx.shadowColor = '#00ffff';
+            ctx.beginPath(); ctx.arc(pLightStr.x, pLightStr.y, 5, 0, 2*Math.PI); ctx.fill();
+
+            if (!isInfinity || (isCaptured && this.fallZ > -11.0) || !isCaptured) {
+                let currentZ = isCaptured ? this.fallZ : getZ(lightProgressDist, 0);
+                let currentX = isCaptured ? this.fallX : lightProgressDist;
+                let pLightDist = project(currentX, 0, currentZ);
+                ctx.fillStyle = '#ff9900';
+                ctx.shadowBlur = 10; ctx.shadowColor = '#ff9900';
+                ctx.beginPath(); ctx.arc(pLightDist.x, pLightDist.y, 5, 0, 2*Math.PI); ctx.fill();
+            }
+            ctx.shadowBlur = 0; 
+        }
+
+        if (isInfinity || mass > 0) {
+            let pCenter = project(0, 0, isInfinity ? -0.2 : 1.5); 
+            let radius = (isInfinity ? 16 : (12 + mass * 2.2)) * (w / 750);
+            
+            let gradient = ctx.createRadialGradient(pCenter.x - radius/3, pCenter.y - radius/3, 2, pCenter.x, pCenter.y, radius);
+            if (isInfinity) {
+                gradient.addColorStop(0, '#222222');
+                gradient.addColorStop(0.8, '#0b0b0b');
+                gradient.addColorStop(1, '#000000');
+                ctx.strokeStyle = '#ff2200';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath(); ctx.arc(pCenter.x, pCenter.y, radius, 0, 2 * Math.PI); ctx.stroke();
+            } else {
+                gradient.addColorStop(0, '#ff5555');
+                gradient.addColorStop(1, '#990000');
+            }
+            
+            ctx.beginPath();
+            ctx.arc(pCenter.x, pCenter.y, radius, 0, 2 * Math.PI);
+            ctx.fillStyle = gradient;
+            ctx.fill();
+        }
+    }
+
+    function updateMassSettings() {
+        massInput = parseFloat(massSlider.value);
+        if (massInput > 5.0) {
+            isInfinity = true;
+            massValue.innerText = "∞ (BH)";
+            massValue.style.color = "#ff3300";
+        } else {
+            isInfinity = false;
+            mass = massInput;
+            massValue.innerText = mass.toFixed(1);
+            massValue.style.color = "#00ffcc";
+        }
+        
+        if (!isAnimating) {
+            lightProgressStr = -10;
+            lightProgressDist = -10;
+            isCaptured = false;
+            pathHistoryStr = [];
+            pathHistoryDist = [];
+            timeStrEl.innerText = "0.00";
+            timeDistEl.innerText = "0.00";
+            timeDelayEl.innerText = "0.00";
+        }
+    }
+
+    massSlider.addEventListener('input', updateMassSettings);
+
+    startBtn.addEventListener('click', () => {
+        lightProgressStr = -10;
+        lightProgressDist = -10;
+        isCaptured = false;
+        pathHistoryStr = [{x: -10, y: 5, z: getZ(-10, 5)}];
+        pathHistoryDist = [{x: -10, y: 0, z: getZ(-10, 0)}];
+        isAnimating = true;
+    });
+
+    function loop() {
+        draw();
+        requestAnimationFrame(loop);
+    }
+    
+    resizeCanvas();
+    updateMassSettings();
+    loop();
+})();
+</script>
+"""
+
+display(HTML(html_code))
